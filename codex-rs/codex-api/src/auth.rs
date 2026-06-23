@@ -1,7 +1,8 @@
-use async_trait::async_trait;
 use codex_client::Request;
 use codex_client::TransportError;
 use http::HeaderMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 /// Error returned while applying authentication to an outbound request.
@@ -26,13 +27,19 @@ impl From<AuthError> for TransportError {
 ///
 /// Header-only providers can implement `add_auth_headers`; providers that sign
 /// complete requests can override `apply_auth`.
-#[async_trait]
 pub trait AuthProvider: Send + Sync {
     /// Adds any auth headers that are available without request body access.
     ///
     /// Implementations should be cheap and non-blocking. This method is also
     /// used by telemetry and non-HTTP request paths.
     fn add_auth_headers(&self, headers: &mut HeaderMap);
+
+    /// Returns any auth headers that are available without request body access.
+    fn to_auth_headers(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        self.add_auth_headers(&mut headers);
+        headers
+    }
 
     /// Applies auth to a complete outbound request and returns the request to send.
     ///
@@ -45,12 +52,17 @@ pub trait AuthProvider: Send + Sync {
     ///
     /// Callers must always use the returned request as authoritative.
     /// If this returns [`AuthError`], the request should not be sent.
-    async fn apply_auth(&self, request: Request) -> Result<Request, AuthError> {
-        let mut request = request;
-        self.add_auth_headers(&mut request.headers);
-        Ok(request)
+    fn apply_auth(&self, request: Request) -> AuthProviderFuture<'_> {
+        Box::pin(async move {
+            let mut request = request;
+            self.add_auth_headers(&mut request.headers);
+            Ok(request)
+        })
     }
 }
+
+pub type AuthProviderFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Request, AuthError>> + Send + 'a>>;
 
 /// Shared auth handle passed through API clients.
 pub type SharedAuthProvider = Arc<dyn AuthProvider>;
